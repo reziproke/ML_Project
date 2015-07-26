@@ -1,0 +1,166 @@
+---
+title: "Project"
+author: "Christian M."
+date: "23. Juli 2015"
+output: html_document
+---
+
+Brief summary: The main approach that is discussed here is one using the random
+forest algorithm in the caret package. It tends to overfit the data pretty heavily
+when set on default which is why an out of sample error rate is provided using
+k-fold cross validation (k=6, chosen error rate = accuracy).
+
+The predictors can basically be divided into three groups. The first are the raw
+data taken from the sensors. The second are averages of the raw data for time intervals 
+of up to 2.5 seconds. The third is the rest of the data like the names of the
+participants or the classes. For further information have a look at the paper 
+of the researchers that produced the data : 
+<http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf>
+
+The total number of columns is 160 so the first thing that comes to mind is to trim these 
+down. The test data contains only 20 rows and none of the variables that are time averages
+are of any use (always NA except for new_window == "yes"). Therefore I throw 
+them out first, leaving 56 columns.
+
+Furthermore the data set is divided into a training and a test set (p=0.75). 
+I use the training data to decide on a training method that I validate on the test set.
+Furthermore cross validation is used later on to get an estimate of the out
+of sample error rate of the method.
+
+```{r}
+set.seed(23498)
+library(MASS)
+library(ggplot2)
+library(lattice)
+library(caret)
+library(klaR)
+library(scatterplot3d)
+library(randomForest)
+# Load data
+data <- read.csv("pml-training.csv")
+data_test <- read.csv("pml-testing.csv")
+
+# Subset data (exclude all the time averages)
+relevant_col <- grep(c("avg|max|min|var|amplitude|kurtosis|skewness|total|stddev")
+                     , names(data), value=TRUE)
+data_rel <- data[,!(names(data) %in% relevant_col)]
+
+# Same for test data
+relevant_col <- grep(c("avg|max|min|var|amplitude|kurtosis|skewness|total|stddev")
+                     , names(data_test), value=TRUE)
+data_rel_test <- data_test[,!(names(data_test) %in% relevant_col)]
+
+# createDataPartition
+
+trainIndex <- createDataPartition(data_rel$classe, p = 0.75, list = FALSE)
+
+training <- data_rel[trainIndex,]
+testing <- data_rel[-trainIndex,]
+
+# Subset to predictors and classe
+
+training <- training[8:56]
+testing <- testing[8:56]
+```
+
+Of all the methods that I tried random forest produced the highest accuracy. 
+The submission score on the submission part of the project was 20/20 using this method.
+I used it like a black box. Unfortunately I do not yet know how it really works
+and what all the possible tuning parameters look like. The biggest issue is that
+its performance is nothing near e.g. linear discriminant analysis (on default).
+It took my PC more than one hour to calculate the following bit of code (on single core):
+
+```{r}
+system.time({
+        
+# Train Model
+        
+modFit <- train(classe~., data = training, method="rf")
+prmod <- predict(modFit,training)
+confM <- confusionMatrix(prmod, training$classe)
+
+# Apply to test set
+
+prmodT <- predict(modFit,testing)
+confMT <- confusionMatrix(prmodT, testing$classe)})
+```
+
+The confusion matrix using the training set is:
+
+```{r}
+confM
+```
+
+And the confusion matrix using the testing set is:
+
+```{r}
+confMT
+```
+
+As expected the algorithm is less accurate on the testing set (it overfits the training
+data).
+
+The performance of the algorithm can be enhanced by cutting back on the predictors 
+using only the most relevant ones. The most relevant predictors given by varImp are:
+
+```{r}
+varImp(modFit)
+```
+
+The top three predictors plotted:
+
+```{r}
+scatterplot3d(training$roll_belt, training$pitch_forearm, training$yaw_belt, 
+              color = as.numeric(training$classe))
+```
+
+As we can see the different classes can be differentiated somewhat using only these three
+variables. In higher dimensions (i.e. more predictors) the distinction is probably
+going to be more clear. We will now look at the 5 most important predictors to build a decent 
+model that does not take one hour in each step of the cross validation and is about 6 
+times faster.
+
+```{r}
+# Take 5 most important variables and save them to rel_names
+x <- varImp(modFit)$importance
+orderIndex <- order(-x)
+rel_names <- rownames(x)[orderIndex]
+rel_names <- c(rel_names[1:5],"classe")
+```
+
+We will use k-fold cross validation (k = 6) and focus on the accuracy for each class
+as the relevant error rate (I could also look at 1-accuracy). 
+
+```{r}
+system.time({
+folds_train <- createFolds(data_rel$classe,k=6,list=TRUE, returnTrain = TRUE)
+save_accuracy <- numeric()
+for(i in 1:6){      
+        trainingC = data_rel[folds_train[[i]],]
+        testingC = data_rel[-folds_train[[i]],]
+        modnb <- train(classe~., data = trainingC[,rel_names], method="rf")
+        prtest <- predict(modnb,testingC)
+        confMcross <- confusionMatrix(prtest, testingC$classe)
+        save_accuracy <- rbind(save_accuracy,confMcross$byClass[,"Balanced Accuracy"])
+}})
+```
+
+The out of sample accuracy for each loop and each class:
+
+```{r}
+save_accuracy
+```
+
+The average accuracy for each class is:
+
+```{r}
+colMeans(save_accuracy)
+```
+
+The algorithm appears to be very accurate.
+
+Now one might wonder if this model can be used more broadly to provide people
+with automatic feedback when working out. Since random forest tends to overfit
+the data (on default) it might somehow make indirect use of the 
+specific "fingerprints" of each of the 6 participants in the data, leading to a much lower
+accuracy when applied to data coming from others.
